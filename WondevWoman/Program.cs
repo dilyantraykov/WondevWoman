@@ -76,6 +76,10 @@ class Player
 
 public class GameContext
 {
+    public List<Unit> AllUnits
+    {
+        get { return this.MyUnits.Concat(this.EnemyUnits).ToList(); }
+    }
     public List<Unit> MyUnits { get; set; }
     public List<Unit> EnemyUnits { get; set; }
     public Cell[,] Grid { get; set; }
@@ -105,75 +109,22 @@ public class GameContext
         }
     }
 
-    public int NumberOfFreeAdjacentCells(Cell cell)
+    public int CalculateStreak(Cell cell, Cell[,] grid, int result)
     {
-        var cells = this.GetNeighbouringCells(cell.Point);
-        return cells.Where(c => c.IsAvailableForMove(cell.Level) && !IsCellOccupied(c)).Count();
-    }
-
-    public bool IsCellOccupied(Cell cell)
-    {
-        return MyUnits.Any(u => u.Point.Equals(cell.Point)) ||
-            EnemyUnits.Any(u => u.Point.Equals(cell.Point));
-    }
-
-    public List<Cell> GetNeighbouringCells(Point point)
-    {
-        var cells = new List<Cell>();
-        for (int i = -1; i <= 1; i++)
+        if (Utils.NumberOfFreeAdjacentCells(cell, this.AllUnits, grid) == 0 || result > 30)
         {
-            for (int j = -1; j <= 1; j++)
-            {
-                if (i == 0 && j == 0)
-                {
-                    continue;
-                }
-
-                var cellX = point.X + j;
-                var cellY = point.Y + i;
-
-                if (cellY < 0 || cellX < 0 || cellX >= this.Grid.GetLength(1) || cellY >= this.Grid.GetLength(0))
-                {
-                    continue;
-                }
-
-                cells.Add(this.Grid[cellY, cellX]);
-            }
-        }
-
-        return cells;
-    }
-
-    private int CalculateStreak(Cell cell, Cell[,] grid, int result)
-    {
-        if (this.NumberOfFreeAdjacentCells(cell) == 0 || result > 30)
-        {
-            //Console.Error.WriteLine($"{cell} Streak: " + result);
+            Console.Error.WriteLine($"{cell} Streak: " + result);
             return result;
         }
 
-        foreach (var c in this.GetNeighbouringCells(cell.Point).Where(c => c.Level != Constants.HoleLevel && c.Level != Constants.RemovedCellLevel))
+        foreach (var c in Utils.GetNeighbouringCells(cell.Point, this.Grid).Where(c => c.Level != Constants.HoleLevel && c.Level != Constants.RemovedCellLevel))
         {
-            var newGrid = CloneGrid(grid);
+            var newGrid = Utils.CloneGrid(grid);
             newGrid[cell.Point.Y, cell.Point.X].Level += 1;
             return CalculateStreak(c, newGrid, ++result);
         }
 
         return 1;
-    }
-
-    private Cell[,] CloneGrid(Cell[,] grid)
-    {
-        var newGrid = new Cell[grid.GetLength(0), grid.GetLength(1)];
-        for (var i = 0; i < grid.GetLength(0); i++)
-        {
-            for (var j = 0; j < grid.GetLength(0); j++)
-            {
-                newGrid[i, j] = grid[i, j].Clone();
-            }
-        }
-
-        return newGrid;
     }
 }
 
@@ -221,7 +172,7 @@ internal class BestMoveHandler : ActionsHandler
         Console.Error.WriteLine("BestMove");
         return context.AvailableActions
                 .Where(a => a.Type == ActionType.MoveAndBuild)
-                .OrderByDescending(a => context.NumberOfFreeAdjacentCells(a.MoveCell))
+                .OrderByDescending(a => Utils.NumberOfFreeAdjacentCells(a.MoveCell, context.AllUnits, context.Grid))
                 .ThenByDescending(a => a.MoveCell.Level)
                 .ThenByDescending(a => a.BuildCell.Level)
                 .FirstOrDefault();
@@ -237,13 +188,15 @@ internal class AvoidBlockHandler : ActionsHandler
         foreach (var unit in context.MyUnits)
         {
             var cell = context.Grid[unit.Point.Y, unit.Point.X];
-            if (context.NumberOfFreeAdjacentCells(cell) == 1 ||
-                context.GetNeighbouringCells(cell.Point).All(c => c.Level >= Constants.TargetLevel))
+            if (Utils.NumberOfFreeAdjacentCells(cell, context.AllUnits, context.Grid) == 1 ||
+                Utils.GetNeighbouringCells(cell.Point, context.Grid).All(c => c.Level >= Constants.TargetLevel))
             {
                 return context.AvailableActions
                     .Where(a => a.Type == ActionType.MoveAndBuild)
                     .Where(a => a.BuildDirection == Utils.GetOppositeDirection(a.MoveDirection))
-                    .OrderByDescending(a => context.NumberOfFreeAdjacentCells(a.MoveCell))
+                    .OrderBy(a => Utils.NumberOfFreeAdjacentCells(a.BuildCell, context.AllUnits, context.Grid))
+                    .ThenByDescending(a => Utils.NumberOfFreeAdjacentCells(a.MoveCell, context.AllUnits, context.Grid))
+                    .ThenByDescending(a => Utils.GetCellPotential(a.MoveCell, context.Grid))
                     .ThenByDescending(a => a.BuildCell.Level)
                     .FirstOrDefault();
             }
@@ -263,6 +216,9 @@ internal class BuildHandler : ActionsHandler
             .Where(a => a.Type == ActionType.MoveAndBuild)
             .Where(a => a.BuildCell.Level <= a.MoveCell.Level && Math.Abs(a.MoveCell.Level - a.Unit.Level) <= 1)
             .OrderByDescending(a => a.MoveCell.Level)
+            .ThenByDescending(a => Utils.GetCellPotential(a.MoveCell, context.Grid))
+            .ThenBy(a => Utils.NumberOfNeighbouringCellsToBePushedOn(a.MoveCell, context.Grid))
+            .ThenBy(a => Utils.NumberOfFreeAdjacentCells(a.BuildCell, context.AllUnits, context.Grid))
             .ThenByDescending(a => a.BuildCell.Level)
             .FirstOrDefault(a => a.BuildCell.Level != Constants.TargetLevel);
     }
@@ -278,7 +234,8 @@ internal class PushEnemyHandler : ActionsHandler
         return context.AvailableActions
             .Where(a => a.Type == ActionType.PushAndBuild)
             .OrderBy(a => a.BuildCell.Level)
-            .Where(a => a.MoveCell.Level > 1 && !context.IsCellOccupied(a.BuildCell))
+            .Where(a => (a.MoveCell.Level > 1 && !Utils.IsCellOccupied(a.BuildCell, context.AllUnits)) ||
+            (a.Unit.Level >= Constants.TargetLevel - 1 && Utils.IsCellOccupied(a.MoveCell, context.EnemyUnits)))
             .FirstOrDefault();
     }
 }
@@ -560,7 +517,59 @@ public static class Utils
         return false;
     }
 
-    public static List<Direction> IsAdjacentDirection(Direction direction)
+    public static List<Cell> GetNeighbouringCells(Point point, Cell[,] grid)
+    {
+        var cells = new List<Cell>();
+        for (int i = -1; i <= 1; i++)
+        {
+            for (int j = -1; j <= 1; j++)
+            {
+                if (i == 0 && j == 0)
+                {
+                    continue;
+                }
+
+                var cellX = point.X + j;
+                var cellY = point.Y + i;
+
+                if (cellY < 0 || cellX < 0 || cellX >= grid.GetLength(1) || cellY >= grid.GetLength(0))
+                {
+                    continue;
+                }
+
+                cells.Add(grid[cellY, cellX]);
+            }
+        }
+
+        return cells;
+    }
+
+    public static int NumberOfFreeAdjacentCells(Cell cell, IEnumerable<Unit> units, Cell[,] grid)
+    {
+        var cells = Utils.GetNeighbouringCells(cell.Point, grid);
+        return cells.Where(c => c.IsAvailableForMove(cell.Level) && !IsCellOccupied(c, units)).Count();
+    }
+
+    public static bool IsCellOccupied(Cell cell, IEnumerable<Unit> units)
+    {
+        return units.Any(u => u.Point.Equals(cell.Point));
+    }
+
+    public static Cell[,] CloneGrid(Cell[,] grid)
+    {
+        var newGrid = new Cell[grid.GetLength(0), grid.GetLength(1)];
+        for (var i = 0; i < grid.GetLength(0); i++)
+        {
+            for (var j = 0; j < grid.GetLength(0); j++)
+            {
+                newGrid[i, j] = grid[i, j].Clone();
+            }
+        }
+
+        return newGrid;
+    }
+
+    public static List<Direction> GetAdjacentDirections(Direction direction)
     {
         switch (direction)
         {
@@ -572,7 +581,6 @@ public static class Utils
                 return new List<Direction>() { direction, (Direction)((int)direction - 1), (Direction)((int)direction + 1) };
         }
     }
-
 
     public static Direction GetDirection(Point point1, Point point2)
     {
@@ -602,5 +610,26 @@ public static class Utils
         }
 
         return (Direction)Enum.Parse(typeof(Direction), direction);
+    }
+
+    public static int NumberOfNeighbouringCellsToBePushedOn(Cell cell, Cell[,] grid)
+    {
+        var result = Utils.GetNeighbouringCells(cell.Point, grid)
+            .Where(c => c.IsAvailableForMove(cell.Level))
+            .Where(c => c.Level < cell.Level)
+            .Count();
+
+        return result;
+    }
+
+    public static int GetCellPotential(Cell cell, Cell[,] grid)
+    {
+        var result = 0;
+        foreach (var c in Utils.GetNeighbouringCells(cell.Point, grid).Where(c => c.IsAvailableForMove(cell.Level)))
+        {
+            result += c.Level;
+        }
+
+        return result;
     }
 }
