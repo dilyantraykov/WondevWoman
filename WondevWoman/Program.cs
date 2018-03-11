@@ -87,18 +87,20 @@ public class GameContext
 
     internal void ProcessTurn()
     {
+        var h0 = new BlockEnemyHandler();
         var h1 = new PushEnemyHandler();
         var h2 = new BuildHandler();
         var h3 = new AvoidBlockHandler();
         var h4 = new BestMoveHandler();
         var h5 = new DefaultActionHandler();
+        h0.SetSuccessor(h1);
         h1.SetSuccessor(h2);
         h2.SetSuccessor(h3);
         h3.SetSuccessor(h4);
         h4.SetSuccessor(h5);
 
-        var finalAction = h1.HandleActions(this);
-        
+        var finalAction = h0.HandleActions(this);
+
         if (finalAction == null)
         {
             Console.WriteLine(Constants.AcceptDefeatAction);
@@ -125,6 +127,48 @@ public class GameContext
         }
 
         return 1;
+    }
+}
+
+internal class BlockEnemyHandler : ActionsHandler
+{
+    public override Action GetBestAction(GameContext context)
+    {
+        Console.Error.WriteLine("BlockEnemy");
+        foreach (var unit in context.EnemyUnits)
+        {
+            var freeAdjacentCellsForUnit = Utils.NumberOfFreeAdjacentCells(Utils.GetCellFromPoint(unit.Point, context.Grid), context.AllUnits, context.Grid);
+            if (freeAdjacentCellsForUnit == 1 && !context.MyUnits.Any(u => Utils.AreAdjacent(u.Point, unit.Point)))
+            {
+                var cellToBlock = Utils.GetNeighbouringCells(unit.Point, context.Grid).First(c => c.IsAvailableForMove(unit.Level));
+                return context.AvailableActions.FirstOrDefault(a => a.BuildCell.Point.Equals(cellToBlock.Point));
+            }
+            else if (freeAdjacentCellsForUnit == 0)
+            {
+                var blockingUnit = context.MyUnits
+                    .Where(u => u.Level >= unit.Level)
+                    .FirstOrDefault(u => Utils.AreAdjacent(u.Point, unit.Point));
+                if (blockingUnit != null)
+                {
+                    var cellToBlock = Utils.GetCellFromPoint(blockingUnit.Point, context.Grid);
+                    return context.AvailableActions.FirstOrDefault(a => a.BuildCell.Point.Equals(cellToBlock.Point));
+                }
+            }
+
+            var neighBouringCells = Utils.GetNeighbouringCells(unit.Point, context.Grid);
+            foreach (var cell in neighBouringCells)
+            {
+                var otherUnits = context.EnemyUnits.Where(u => u.Id != unit.Id).Concat(context.MyUnits);
+                if (Utils.NumberOfFreeAdjacentCells(cell, otherUnits, context.Grid) == 1)
+                {
+                    return context.AvailableActions
+                        .Where(a => a.Type == ActionType.PushAndBuild)
+                        .FirstOrDefault(a => a.BuildCell.Point.Equals(cell.Point));
+                }
+            }
+        }
+
+        return null;
     }
 }
 
@@ -185,24 +229,36 @@ internal class AvoidBlockHandler : ActionsHandler
     {
         Console.Error.WriteLine("AvoidBlock");
 
+        var actions = new List<Action>();
         foreach (var unit in context.MyUnits)
         {
             var cell = context.Grid[unit.Point.Y, unit.Point.X];
-            if (Utils.NumberOfFreeAdjacentCells(cell, context.AllUnits, context.Grid) == 1 ||
-                Utils.GetNeighbouringCells(cell.Point, context.Grid).All(c => c.Level >= Constants.TargetLevel))
+            if (Utils.NumberOfFreeAdjacentCells(cell, context.AllUnits, context.Grid) == 1)
             {
-                return context.AvailableActions
+                actions.Add(context.AvailableActions
+                    .Where(a => a.Unit.Id == unit.Id)
                     .Where(a => a.Type == ActionType.MoveAndBuild)
                     .Where(a => a.BuildDirection == Utils.GetOppositeDirection(a.MoveDirection))
+                    .FirstOrDefault());
+            }
+
+            if (Utils.GetNeighbouringCells(cell.Point, context.Grid)
+                .Where(c => c.Level != Constants.HoleLevel)
+                .All(c => c.Level >= Constants.TargetLevel))
+            {
+                actions.Add(context.AvailableActions
+                    .Where(a => a.Unit.Id == unit.Id)
+                    .Where(a => a.Type == ActionType.MoveAndBuild)
                     .OrderBy(a => Utils.NumberOfFreeAdjacentCells(a.BuildCell, context.AllUnits, context.Grid))
                     .ThenByDescending(a => Utils.NumberOfFreeAdjacentCells(a.MoveCell, context.AllUnits, context.Grid))
-                    .ThenByDescending(a => Utils.GetCellPotential(a.MoveCell, context.Grid))
+                    .ThenBy(a => Utils.GetCellPotential(a.BuildCell, context.Grid))
+                    .ThenBy(a => Utils.GetCellPotential(a.MoveCell, context.Grid))
                     .ThenByDescending(a => a.BuildCell.Level)
-                    .FirstOrDefault();
+                    .FirstOrDefault());
             }
         }
 
-        return null;
+        return actions.FirstOrDefault();
     }
 }
 
@@ -233,6 +289,7 @@ internal class PushEnemyHandler : ActionsHandler
 
         return context.AvailableActions
             .Where(a => a.Type == ActionType.PushAndBuild)
+            .Where(a => Utils.NumberOfFreeAdjacentCells(Utils.GetCellFromPoint(a.Unit.Point, context.Grid), context.AllUnits, context.Grid) != 1)
             .OrderBy(a => a.BuildCell.Level)
             .Where(a => (a.MoveCell.Level > 1 && !Utils.IsCellOccupied(a.BuildCell, context.AllUnits)) ||
             (a.Unit.Level >= Constants.TargetLevel - 1 && Utils.IsCellOccupied(a.MoveCell, context.EnemyUnits)))
@@ -631,5 +688,10 @@ public static class Utils
         }
 
         return result;
+    }
+
+    public static Cell GetCellFromPoint(Point point, Cell[,] grid)
+    {
+        return grid[point.Y, point.X];
     }
 }
